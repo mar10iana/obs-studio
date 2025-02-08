@@ -30,6 +30,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define SETTING_COLOR                  "color"
 #define SETTING_COLOR_MULTIPLY         "color_multiply"
 #define SETTING_COLOR_ADD              "color_add"
+#define SETTING_WHITE_BALANCE_RED      "white_balance_red"
+#define SETTING_WHITE_BALANCE_GREEN    "white_balance_green"
+#define SETTING_WHITE_BALANCE_BLUE     "white_balance_blue"
 
 #define TEXT_SDR_ONLY_INFO             obs_module_text("SdrOnlyInfo")
 #define TEXT_GAMMA                     obs_module_text("Gamma")
@@ -41,6 +44,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define TEXT_COLOR                     obs_module_text("Color")
 #define TEXT_COLOR_MULTIPLY            obs_module_text("ColorMultiply")
 #define TEXT_COLOR_ADD                 obs_module_text("ColorAdd")
+#define TEXT_WHITE_BALANCE_RED         obs_module_text("White Balance Red")
+#define TEXT_WHITE_BALANCE_GREEN       obs_module_text("White Balance Green")
+#define TEXT_WHITE_BALANCE_BLUE        obs_module_text("White Balance Blue")
 
 /* clang-format on */
 
@@ -53,6 +59,7 @@ struct color_correction_filter_data {
 	gs_eparam_t *final_matrix_param;
 
 	float gamma;
+	float white_balance;
 
 	/* Pre-Computes */
 	struct matrix4 con_matrix;
@@ -74,6 +81,7 @@ struct color_correction_filter_data_v2 {
 	gs_eparam_t *final_matrix_param;
 
 	float gamma;
+	float white_balance;
 
 	/* Pre-Computes */
 	struct matrix4 con_matrix;
@@ -117,16 +125,20 @@ static void color_correction_filter_update_v1(void *data, obs_data_t *settings)
 	filter->gamma = (float)gamma;
 
 	/* Build our contrast number. */
-	float contrast = (float)obs_data_get_double(settings, SETTING_CONTRAST) + 1.0f;
+	float contrast =
+		(float)obs_data_get_double(settings, SETTING_CONTRAST) + 1.0f;
 	float one_minus_con = (1.0f - contrast) / 2.0f;
 
 	/* Now let's build our Contrast matrix. */
-	filter->con_matrix = (struct matrix4){contrast,      0.0f,          0.0f,          0.0f, 0.0f,     contrast,
-					      0.0f,          0.0f,          0.0f,          0.0f, contrast, 0.0f,
-					      one_minus_con, one_minus_con, one_minus_con, 1.0f};
+	filter->con_matrix = (struct matrix4){
+		contrast,      0.0f,          0.0f,          0.0f,
+		0.0f,          contrast,      0.0f,          0.0f,
+		0.0f,          0.0f,          contrast,      0.0f,
+		one_minus_con, one_minus_con, one_minus_con, 1.0f};
 
 	/* Build our brightness number. */
-	float brightness = (float)obs_data_get_double(settings, SETTING_BRIGHTNESS);
+	float brightness =
+		(float)obs_data_get_double(settings, SETTING_BRIGHTNESS);
 
 	/*
 	 * Now let's build our Brightness matrix.
@@ -139,7 +151,8 @@ static void color_correction_filter_update_v1(void *data, obs_data_t *settings)
 	filter->bright_matrix.t.z = brightness;
 
 	/* Build our Saturation number. */
-	float saturation = (float)obs_data_get_double(settings, SETTING_SATURATION) + 1.0f;
+	float saturation =
+		(float)obs_data_get_double(settings, SETTING_SATURATION) + 1.0f;
 
 	/* Factor in the selected color weights. */
 	float one_minus_sat_red = (1.0f - saturation) * red_weight;
@@ -168,10 +181,12 @@ static void color_correction_filter_update_v1(void *data, obs_data_t *settings)
 					      1.0f};
 
 	/* Build our Hue number. */
-	float hue_shift = (float)obs_data_get_double(settings, SETTING_HUESHIFT);
+	float hue_shift =
+		(float)obs_data_get_double(settings, SETTING_HUESHIFT);
 
 	/* Build our Transparency number. */
-	float opacity = (float)obs_data_get_int(settings, SETTING_OPACITY) * 0.01f;
+	float opacity =
+		(float)obs_data_get_int(settings, SETTING_OPACITY) * 0.01f;
 
 	/* Hue is the radian of 0 to 360 degrees. */
 	float half_angle = 0.5f * (float)(hue_shift / (180.0f / M_PI));
@@ -237,14 +252,39 @@ static void color_correction_filter_update_v1(void *data, obs_data_t *settings)
 	filter->color_matrix.t.y = color_v4.w * color_v4.y;
 	filter->color_matrix.t.z = color_v4.w * color_v4.z;
 
+	/* Now we retrieve the white balance settings */
+	float white_balance_red =
+		(float)obs_data_get_double(settings, SETTING_WHITE_BALANCE_RED);
+	float white_balance_green = (float)obs_data_get_double(
+		settings, SETTING_WHITE_BALANCE_GREEN);
+	float white_balance_blue = (float)obs_data_get_double(
+		settings, SETTING_WHITE_BALANCE_BLUE);
+
+	/* Next we calculate gains for red, green, and blue channels */
+	float red_gain = 1.0f + white_balance_red;
+	float green_gain = 1.0f + white_balance_green;
+	float blue_gain = 1.0f + white_balance_blue;
+
+	/* Finally we construct the white balance matrix */
+	struct matrix4 white_balance_matrix = {
+		red_gain, 0.0f, 0.0f,      0.0f, 0.0f, green_gain, 0.0f, 0.0f,
+		0.0f,     0.0f, blue_gain, 0.0f, 0.0f, 0.0f,       0.0f, 1.0f};
+
 	/* First we apply the Contrast & Brightness matrix. */
-	matrix4_mul(&filter->final_matrix, &filter->bright_matrix, &filter->con_matrix);
+	matrix4_mul(&filter->final_matrix, &filter->bright_matrix,
+		    &filter->con_matrix);
 	/* Now we apply the Saturation matrix. */
-	matrix4_mul(&filter->final_matrix, &filter->final_matrix, &filter->sat_matrix);
+	matrix4_mul(&filter->final_matrix, &filter->final_matrix,
+		    &filter->sat_matrix);
 	/* Next we apply the Hue+Opacity matrix. */
-	matrix4_mul(&filter->final_matrix, &filter->final_matrix, &filter->hue_op_matrix);
-	/* Lastly we apply the Color Wash matrix. */
-	matrix4_mul(&filter->final_matrix, &filter->final_matrix, &filter->color_matrix);
+	matrix4_mul(&filter->final_matrix, &filter->final_matrix,
+		    &filter->hue_op_matrix);
+	/* Now we apply the Color Wash matrix. */
+	matrix4_mul(&filter->final_matrix, &filter->final_matrix,
+		    &filter->color_matrix);
+	/* Lastly we apply the White Balance matrix */
+	matrix4_mul(&filter->final_matrix, &filter->final_matrix,
+		    &white_balance_matrix);
 }
 
 static void color_correction_filter_update_v2(void *data, obs_data_t *settings)
@@ -258,14 +298,18 @@ static void color_correction_filter_update_v2(void *data, obs_data_t *settings)
 
 	/* Build our contrast number. */
 	float contrast = (float)obs_data_get_double(settings, SETTING_CONTRAST);
-	contrast = (contrast < 0.0f) ? (1.0f / (-contrast + 1.0f)) : (contrast + 1.0f);
+	contrast = (contrast < 0.0f) ? (1.0f / (-contrast + 1.0f))
+				     : (contrast + 1.0f);
 
 	/* Now let's build our Contrast matrix. */
-	filter->con_matrix = (struct matrix4){contrast, 0.0f, 0.0f,     0.0f, 0.0f, contrast, 0.0f, 0.0f,
-					      0.0f,     0.0f, contrast, 0.0f, 0.0f, 0.0f,     0.0f, 1.0f};
+	filter->con_matrix = (struct matrix4){contrast, 0.0f, 0.0f, 0.0f, 0.0f,
+					      contrast, 0.0f, 0.0f, 0.0f, 0.0f,
+					      contrast, 0.0f, 0.0f, 0.0f, 0.0f,
+					      1.0f};
 
 	/* Build our brightness number. */
-	float brightness = (float)obs_data_get_double(settings, SETTING_BRIGHTNESS);
+	float brightness =
+		(float)obs_data_get_double(settings, SETTING_BRIGHTNESS);
 
 	/*
 	 * Now let's build our Brightness matrix.
@@ -278,7 +322,8 @@ static void color_correction_filter_update_v2(void *data, obs_data_t *settings)
 	filter->bright_matrix.t.z = brightness;
 
 	/* Build our Saturation number. */
-	float saturation = (float)obs_data_get_double(settings, SETTING_SATURATION) + 1.0f;
+	float saturation =
+		(float)obs_data_get_double(settings, SETTING_SATURATION) + 1.0f;
 
 	/* Factor in the selected color weights. */
 	float one_minus_sat_red = (1.0f - saturation) * red_weight;
@@ -307,7 +352,8 @@ static void color_correction_filter_update_v2(void *data, obs_data_t *settings)
 					      1.0f};
 
 	/* Build our Hue number. */
-	float hue_shift = (float)obs_data_get_double(settings, SETTING_HUESHIFT);
+	float hue_shift =
+		(float)obs_data_get_double(settings, SETTING_HUESHIFT);
 
 	/* Build our Transparency number. */
 	float opacity = (float)obs_data_get_double(settings, SETTING_OPACITY);
@@ -358,12 +404,14 @@ static void color_correction_filter_update_v2(void *data, obs_data_t *settings)
 						 opacity};
 
 	/* Now get the overlay color multiply data. */
-	uint32_t color_multiply = (uint32_t)obs_data_get_int(settings, SETTING_COLOR_MULTIPLY);
+	uint32_t color_multiply =
+		(uint32_t)obs_data_get_int(settings, SETTING_COLOR_MULTIPLY);
 	struct vec4 color_multiply_v4;
 	vec4_from_rgba_srgb(&color_multiply_v4, color_multiply);
 
 	/* Now get the overlay color add data. */
-	uint32_t color_add = (uint32_t)obs_data_get_int(settings, SETTING_COLOR_ADD);
+	uint32_t color_add =
+		(uint32_t)obs_data_get_int(settings, SETTING_COLOR_ADD);
 	struct vec4 color_add_v4;
 	vec4_from_rgba_srgb(&color_add_v4, color_add);
 
@@ -381,14 +429,39 @@ static void color_correction_filter_update_v2(void *data, obs_data_t *settings)
 	filter->color_matrix.t.y = color_add_v4.y;
 	filter->color_matrix.t.z = color_add_v4.z;
 
+	/* Now we retrieve the white balance settings */
+	float white_balance_red =
+		(float)obs_data_get_double(settings, SETTING_WHITE_BALANCE_RED);
+	float white_balance_green = (float)obs_data_get_double(
+		settings, SETTING_WHITE_BALANCE_GREEN);
+	float white_balance_blue = (float)obs_data_get_double(
+		settings, SETTING_WHITE_BALANCE_BLUE);
+
+	/* Next we calculate gains for red, green, and blue channels */
+	float red_gain = 1.0f + white_balance_red;
+	float green_gain = 1.0f + white_balance_green;
+	float blue_gain = 1.0f + white_balance_blue;
+
+	/* Finally we construct the white balance matrix */
+	struct matrix4 white_balance_matrix = {
+		red_gain, 0.0f, 0.0f,      0.0f, 0.0f, green_gain, 0.0f, 0.0f,
+		0.0f,     0.0f, blue_gain, 0.0f, 0.0f, 0.0f,       0.0f, 1.0f};
+
 	/* First we apply the Contrast & Brightness matrix. */
-	matrix4_mul(&filter->final_matrix, &filter->con_matrix, &filter->bright_matrix);
+	matrix4_mul(&filter->final_matrix, &filter->con_matrix,
+		    &filter->bright_matrix);
 	/* Now we apply the Saturation matrix. */
-	matrix4_mul(&filter->final_matrix, &filter->final_matrix, &filter->sat_matrix);
+	matrix4_mul(&filter->final_matrix, &filter->final_matrix,
+		    &filter->sat_matrix);
 	/* Next we apply the Hue+Opacity matrix. */
-	matrix4_mul(&filter->final_matrix, &filter->final_matrix, &filter->hue_op_matrix);
-	/* Lastly we apply the Color Wash matrix. */
-	matrix4_mul(&filter->final_matrix, &filter->final_matrix, &filter->color_matrix);
+	matrix4_mul(&filter->final_matrix, &filter->final_matrix,
+		    &filter->hue_op_matrix);
+	/* Now we apply the Color Wash matrix. */
+	matrix4_mul(&filter->final_matrix, &filter->final_matrix,
+		    &filter->color_matrix);
+	/* Lastly we apply the White Balance matrix*/
+	matrix4_mul(&filter->final_matrix, &filter->final_matrix,
+		    &white_balance_matrix);
 }
 
 /*
@@ -428,7 +501,8 @@ static void color_correction_filter_destroy_v2(void *data)
  * filter, it also calls the render function (farther below) that contains the
  * actual rendering code.
  */
-static void *color_correction_filter_create_v1(obs_data_t *settings, obs_source_t *context)
+static void *color_correction_filter_create_v1(obs_data_t *settings,
+					       obs_source_t *context)
 {
 	/*
 	 * Because of limitations of pre-c99 compilers, you can't create an
@@ -436,7 +510,8 @@ static void *color_correction_filter_create_v1(obs_data_t *settings, obs_source_
 	 * function calculates the size needed and allocates memory to
 	 * handle the source.
 	 */
-	struct color_correction_filter_data *filter = bzalloc(sizeof(struct color_correction_filter_data));
+	struct color_correction_filter_data *filter =
+		bzalloc(sizeof(struct color_correction_filter_data));
 
 	/*
 	 * By default the effect file is stored in the ./data directory that
@@ -451,6 +526,8 @@ static void *color_correction_filter_create_v1(obs_data_t *settings, obs_source_
 	matrix4_identity(&filter->bright_matrix);
 	matrix4_identity(&filter->color_matrix);
 
+	filter->white_balance = 0.0f;
+
 	/* Here we enter the GPU drawing/shader portion of our code. */
 	obs_enter_graphics();
 
@@ -459,8 +536,10 @@ static void *color_correction_filter_create_v1(obs_data_t *settings, obs_source_
 
 	/* If the filter is active pass the parameters to the filter. */
 	if (filter->effect) {
-		filter->gamma_param = gs_effect_get_param_by_name(filter->effect, SETTING_GAMMA);
-		filter->final_matrix_param = gs_effect_get_param_by_name(filter->effect, "color_matrix");
+		filter->gamma_param = gs_effect_get_param_by_name(
+			filter->effect, SETTING_GAMMA);
+		filter->final_matrix_param = gs_effect_get_param_by_name(
+			filter->effect, "color_matrix");
 	}
 
 	obs_leave_graphics();
@@ -486,7 +565,8 @@ static void *color_correction_filter_create_v1(obs_data_t *settings, obs_source_
 	return filter;
 }
 
-static void *color_correction_filter_create_v2(obs_data_t *settings, obs_source_t *context)
+static void *color_correction_filter_create_v2(obs_data_t *settings,
+					       obs_source_t *context)
 {
 	/*
 	 * Because of limitations of pre-c99 compilers, you can't create an
@@ -494,7 +574,8 @@ static void *color_correction_filter_create_v2(obs_data_t *settings, obs_source_
 	 * function calculates the size needed and allocates memory to
 	 * handle the source.
 	 */
-	struct color_correction_filter_data_v2 *filter = bzalloc(sizeof(struct color_correction_filter_data_v2));
+	struct color_correction_filter_data_v2 *filter =
+		bzalloc(sizeof(struct color_correction_filter_data_v2));
 
 	/*
 	 * By default the effect file is stored in the ./data directory that
@@ -509,6 +590,8 @@ static void *color_correction_filter_create_v2(obs_data_t *settings, obs_source_
 	matrix4_identity(&filter->bright_matrix);
 	matrix4_identity(&filter->color_matrix);
 
+	filter->white_balance = 0.0f;
+
 	/* Here we enter the GPU drawing/shader portion of our code. */
 	obs_enter_graphics();
 
@@ -517,8 +600,10 @@ static void *color_correction_filter_create_v2(obs_data_t *settings, obs_source_
 
 	/* If the filter is active pass the parameters to the filter. */
 	if (filter->effect) {
-		filter->gamma_param = gs_effect_get_param_by_name(filter->effect, SETTING_GAMMA);
-		filter->final_matrix_param = gs_effect_get_param_by_name(filter->effect, "color_matrix");
+		filter->gamma_param = gs_effect_get_param_by_name(
+			filter->effect, SETTING_GAMMA);
+		filter->final_matrix_param = gs_effect_get_param_by_name(
+			filter->effect, "color_matrix");
 	}
 
 	obs_leave_graphics();
@@ -549,12 +634,14 @@ static void color_correction_filter_render_v1(void *data, gs_effect_t *effect)
 {
 	struct color_correction_filter_data *filter = data;
 
-	if (!obs_source_process_filter_begin(filter->context, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING))
+	if (!obs_source_process_filter_begin(filter->context, GS_RGBA,
+					     OBS_ALLOW_DIRECT_RENDERING))
 		return;
 
 	/* Now pass the interface variables to the .effect file. */
 	gs_effect_set_float(filter->gamma_param, filter->gamma);
-	gs_effect_set_matrix4(filter->final_matrix_param, &filter->final_matrix);
+	gs_effect_set_matrix4(filter->final_matrix_param,
+			      &filter->final_matrix);
 
 	gs_blend_state_push();
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
@@ -579,21 +666,26 @@ static void color_correction_filter_render_v2(void *data, gs_effect_t *effect)
 	};
 
 	const enum gs_color_space source_space = obs_source_get_color_space(
-		obs_filter_get_target(filter->context), OBS_COUNTOF(preferred_spaces), preferred_spaces);
+		obs_filter_get_target(filter->context),
+		OBS_COUNTOF(preferred_spaces), preferred_spaces);
 	if (source_space == GS_CS_709_EXTENDED) {
 		obs_source_skip_video_filter(filter->context);
 	} else {
-		const enum gs_color_format format = gs_get_format_from_space(source_space);
-		if (obs_source_process_filter_begin_with_color_space(filter->context, format, source_space,
-								     OBS_ALLOW_DIRECT_RENDERING)) {
+		const enum gs_color_format format =
+			gs_get_format_from_space(source_space);
+		if (obs_source_process_filter_begin_with_color_space(
+			    filter->context, format, source_space,
+			    OBS_ALLOW_DIRECT_RENDERING)) {
 			/* Now pass the interface variables to the .effect file. */
 			gs_effect_set_float(filter->gamma_param, filter->gamma);
-			gs_effect_set_matrix4(filter->final_matrix_param, &filter->final_matrix);
+			gs_effect_set_matrix4(filter->final_matrix_param,
+					      &filter->final_matrix);
 
 			gs_blend_state_push();
 			gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 
-			obs_source_process_filter_end(filter->context, filter->effect, 0, 0);
+			obs_source_process_filter_end(filter->context,
+						      filter->effect, 0, 0);
 
 			gs_blend_state_pop();
 		}
@@ -610,13 +702,28 @@ static obs_properties_t *color_correction_filter_properties_v1(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
 
-	obs_properties_add_float_slider(props, SETTING_GAMMA, TEXT_GAMMA, -3.0, 3.0, 0.01);
+	obs_properties_add_float_slider(props, SETTING_GAMMA, TEXT_GAMMA, -3.0,
+					3.0, 0.01);
 
-	obs_properties_add_float_slider(props, SETTING_CONTRAST, TEXT_CONTRAST, -2.0, 2.0, 0.01);
-	obs_properties_add_float_slider(props, SETTING_BRIGHTNESS, TEXT_BRIGHTNESS, -1.0, 1.0, 0.01);
-	obs_properties_add_float_slider(props, SETTING_SATURATION, TEXT_SATURATION, -1.0, 5.0, 0.01);
-	obs_properties_add_float_slider(props, SETTING_HUESHIFT, TEXT_HUESHIFT, -180.0, 180.0, 0.01);
-	obs_properties_add_int_slider(props, SETTING_OPACITY, TEXT_OPACITY, 0, 100, 1);
+	obs_properties_add_float_slider(props, SETTING_CONTRAST, TEXT_CONTRAST,
+					-2.0, 2.0, 0.01);
+	obs_properties_add_float_slider(props, SETTING_BRIGHTNESS,
+					TEXT_BRIGHTNESS, -1.0, 1.0, 0.01);
+	obs_properties_add_float_slider(props, SETTING_SATURATION,
+					TEXT_SATURATION, -1.0, 5.0, 0.01);
+	obs_properties_add_float_slider(props, SETTING_HUESHIFT, TEXT_HUESHIFT,
+					-180.0, 180.0, 0.01);
+	obs_properties_add_int_slider(props, SETTING_OPACITY, TEXT_OPACITY, 0,
+				      100, 1);
+	obs_properties_add_float_slider(props, SETTING_WHITE_BALANCE_RED,
+					TEXT_WHITE_BALANCE_RED, -1.0, 1.0,
+					0.01);
+	obs_properties_add_float_slider(props, SETTING_WHITE_BALANCE_GREEN,
+					TEXT_WHITE_BALANCE_GREEN, -1.0, 1.0,
+					0.01);
+	obs_properties_add_float_slider(props, SETTING_WHITE_BALANCE_BLUE,
+					TEXT_WHITE_BALANCE_BLUE, -1.0, 1.0,
+					0.01);
 
 	obs_properties_add_color_alpha(props, SETTING_COLOR, TEXT_COLOR);
 
@@ -628,17 +735,34 @@ static obs_properties_t *color_correction_filter_properties_v2(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
 
-	obs_properties_add_text(props, SETTING_SDR_ONLY_INFO, TEXT_SDR_ONLY_INFO, OBS_TEXT_INFO);
+	obs_properties_add_text(props, SETTING_SDR_ONLY_INFO,
+				TEXT_SDR_ONLY_INFO, OBS_TEXT_INFO);
 
-	obs_properties_add_float_slider(props, SETTING_GAMMA, TEXT_GAMMA, -3.0, 3.0, 0.01);
+	obs_properties_add_float_slider(props, SETTING_GAMMA, TEXT_GAMMA, -3.0,
+					3.0, 0.01);
 
-	obs_properties_add_float_slider(props, SETTING_CONTRAST, TEXT_CONTRAST, -4.0, 4.0, 0.01);
-	obs_properties_add_float_slider(props, SETTING_BRIGHTNESS, TEXT_BRIGHTNESS, -1.0, 1.0, 0.0001);
-	obs_properties_add_float_slider(props, SETTING_SATURATION, TEXT_SATURATION, -1.0, 5.0, 0.01);
-	obs_properties_add_float_slider(props, SETTING_HUESHIFT, TEXT_HUESHIFT, -180.0, 180.0, 0.01);
-	obs_properties_add_float_slider(props, SETTING_OPACITY, TEXT_OPACITY, 0.0, 1.0, 0.0001);
+	obs_properties_add_float_slider(props, SETTING_CONTRAST, TEXT_CONTRAST,
+					-4.0, 4.0, 0.01);
+	obs_properties_add_float_slider(props, SETTING_BRIGHTNESS,
+					TEXT_BRIGHTNESS, -1.0, 1.0, 0.0001);
+	obs_properties_add_float_slider(props, SETTING_SATURATION,
+					TEXT_SATURATION, -1.0, 5.0, 0.01);
+	obs_properties_add_float_slider(props, SETTING_HUESHIFT, TEXT_HUESHIFT,
+					-180.0, 180.0, 0.01);
+	obs_properties_add_float_slider(props, SETTING_OPACITY, TEXT_OPACITY,
+					0.0, 1.0, 0.0001);
+	obs_properties_add_float_slider(props, SETTING_WHITE_BALANCE_RED,
+					TEXT_WHITE_BALANCE_RED, -1.0, 1.0,
+					0.01);
+	obs_properties_add_float_slider(props, SETTING_WHITE_BALANCE_GREEN,
+					TEXT_WHITE_BALANCE_GREEN, -1.0, 1.0,
+					0.01);
+	obs_properties_add_float_slider(props, SETTING_WHITE_BALANCE_BLUE,
+					TEXT_WHITE_BALANCE_BLUE, -1.0, 1.0,
+					0.01);
 
-	obs_properties_add_color(props, SETTING_COLOR_MULTIPLY, TEXT_COLOR_MULTIPLY);
+	obs_properties_add_color(props, SETTING_COLOR_MULTIPLY,
+				 TEXT_COLOR_MULTIPLY);
 	obs_properties_add_color(props, SETTING_COLOR_ADD, TEXT_COLOR_ADD);
 
 	UNUSED_PARAMETER(data);
@@ -661,6 +785,9 @@ static void color_correction_filter_defaults_v1(obs_data_t *settings)
 	obs_data_set_default_double(settings, SETTING_HUESHIFT, 0.0);
 	obs_data_set_default_int(settings, SETTING_OPACITY, 100);
 	obs_data_set_default_int(settings, SETTING_COLOR, 0x00FFFFFF);
+	obs_data_set_default_double(settings, SETTING_WHITE_BALANCE_RED, 0.0);
+	obs_data_set_default_double(settings, SETTING_WHITE_BALANCE_GREEN, 0.0);
+	obs_data_set_default_double(settings, SETTING_WHITE_BALANCE_BLUE, 0.0);
 }
 
 static void color_correction_filter_defaults_v2(obs_data_t *settings)
@@ -673,10 +800,13 @@ static void color_correction_filter_defaults_v2(obs_data_t *settings)
 	obs_data_set_default_double(settings, SETTING_OPACITY, 1.0);
 	obs_data_set_default_int(settings, SETTING_COLOR_MULTIPLY, 0x00FFFFFF);
 	obs_data_set_default_int(settings, SETTING_COLOR_ADD, 0x00000000);
+	obs_data_set_default_double(settings, SETTING_WHITE_BALANCE_RED, 0.0);
+	obs_data_set_default_double(settings, SETTING_WHITE_BALANCE_GREEN, 0.0);
+	obs_data_set_default_double(settings, SETTING_WHITE_BALANCE_BLUE, 0.0);
 }
 
-static enum gs_color_space color_correction_filter_get_color_space(void *data, size_t count,
-								   const enum gs_color_space *preferred_spaces)
+static enum gs_color_space color_correction_filter_get_color_space(
+	void *data, size_t count, const enum gs_color_space *preferred_spaces)
 {
 	UNUSED_PARAMETER(count);
 	UNUSED_PARAMETER(preferred_spaces);
@@ -689,7 +819,8 @@ static enum gs_color_space color_correction_filter_get_color_space(void *data, s
 
 	struct color_correction_filter_data_v2 *const filter = data;
 	const enum gs_color_space source_space = obs_source_get_color_space(
-		obs_filter_get_target(filter->context), OBS_COUNTOF(potential_spaces), potential_spaces);
+		obs_filter_get_target(filter->context),
+		OBS_COUNTOF(potential_spaces), potential_spaces);
 
 	return source_space;
 }
